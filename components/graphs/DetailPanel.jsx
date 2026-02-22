@@ -1,8 +1,9 @@
-import { GRAPH_DATA } from "./temporaryData";
 import { EDGE_CFG, LAYER_META, NODE_CFG } from "./config";
 
-function ConnectionsList({ selected, setSelected }) {
-  const conns = GRAPH_DATA.links.filter(
+function ConnectionsList({ selected, setSelected, graphData }) {
+  const links = Array.isArray(graphData?.links) ? graphData.links : [];
+  const nodes = Array.isArray(graphData?.nodes) ? graphData.nodes : [];
+  const conns = links.filter(
     (l) => l.source === selected.id || l.target === selected.id,
   );
 
@@ -38,7 +39,7 @@ function ConnectionsList({ selected, setSelected }) {
       >
         {conns.map((l, i) => {
           const otherId = l.source === selected.id ? l.target : l.source;
-          const other = GRAPH_DATA.nodes.find((n) => n.id === otherId);
+          const other = nodes.find((n) => n.id === otherId);
           if (!other) return null;
 
           const ec = EDGE_CFG[l.type] || EDGE_CFG.connects_to;
@@ -113,6 +114,7 @@ function ConnectionsList({ selected, setSelected }) {
 
 function SourcesList({ selected }) {
   const cfg = NODE_CFG[selected.type] || NODE_CFG.Concept;
+  const sources = Array.isArray(selected.sources) ? selected.sources : [];
 
   return (
     <div style={{ flex: 1, overflowY: "auto", padding: "14px 20px" }}>
@@ -126,10 +128,10 @@ function SourcesList({ selected }) {
           marginBottom: 12,
         }}
       >
-        Sources ({selected.sources.length})
+        Sources ({sources.length})
       </div>
 
-      {selected.sources.length === 0 && (
+      {sources.length === 0 && (
         <div
           style={{
             fontSize: 12,
@@ -142,7 +144,7 @@ function SourcesList({ selected }) {
         </div>
       )}
 
-      {selected.sources.map((src, i) => (
+      {sources.map((src, i) => (
         <div
           key={i}
           style={{
@@ -212,7 +214,7 @@ function SourcesList({ selected }) {
   );
 }
 
-function DetailPanelInner({ selected, setSelected }) {
+function DetailPanelInner({ selected, setSelected, graphData }) {
   const cfg = NODE_CFG[selected.type] || NODE_CFG.Concept;
   const meta = LAYER_META[selected.layer] || {
     name: `Layer ${selected.layer}`,
@@ -352,13 +354,17 @@ function DetailPanelInner({ selected, setSelected }) {
         </div>
       </div>
 
-      <ConnectionsList selected={selected} setSelected={setSelected} />
+      <ConnectionsList
+        selected={selected}
+        setSelected={setSelected}
+        graphData={graphData}
+      />
       <SourcesList selected={selected} />
     </>
   );
 }
 
-export default function DetailPanel({ selected, setSelected }) {
+export default function DetailPanel({ selected, setSelected, graphData }) {
   return (
     <div
       style={{
@@ -379,7 +385,11 @@ export default function DetailPanel({ selected, setSelected }) {
       }}
     >
       {selected && (
-        <DetailPanelInner selected={selected} setSelected={setSelected} />
+        <DetailPanelInner
+          selected={selected}
+          setSelected={setSelected}
+          graphData={graphData}
+        />
       )}
     </div>
   );
