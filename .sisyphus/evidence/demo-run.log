@@ -1,0 +1,8 @@
+[demo] starting compose services
+[demo] backend openapi
+[demo] backend extract using field=artifact_path
+[demo] frontend proxy openapi
+[demo] frontend capabilities
+[demo] full flow available; running generate
+[demo] full demo completed
+[demo] done

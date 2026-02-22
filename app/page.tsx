@@ -63,13 +63,6 @@ export default function Home() {
       return { ok: false, message: "Please choose at least one file." };
     }
 
-    if (selected.length > 1) {
-      return {
-        ok: false,
-        message: "Please choose one file. Backend accepts one file per upload.",
-      };
-    }
-
     for (const file of selected) {
       const ext = getExtension(file.name);
       if (!SUPPORTED_EXTENSIONS.has(ext)) {
@@ -89,14 +82,19 @@ export default function Home() {
 
   function onSelect(fileList: FileList | null) {
     const selected = fileList ? Array.from(fileList) : [];
-    const verdict = validate(selected);
+    const combined = [...files, ...selected];
+    const verdict = validate(combined);
     if (!verdict.ok) {
       setError(verdict.message);
       return;
     }
 
     setError(null);
-    setFiles(selected);
+    setFiles(combined);
+  }
+
+  function removeFile(index: number) {
+    setFiles((prev) => prev.filter((_, i) => i !== index));
   }
 
   async function onGenerate() {
@@ -177,7 +175,7 @@ export default function Home() {
       >
         <h1 style={{ fontSize: 32, margin: 0 }}>Knowledge Graph Uploader</h1>
         <p style={{ marginTop: 10, color: "#94a3b8", lineHeight: 1.6 }}>
-          Upload a study file, process it through the backend, and open the generated graph.
+          Upload one or more study files, process them through the backend, and open the generated graph.
         </p>
 
         <label style={{ display: "block", marginTop: 20 }}>
@@ -206,6 +204,7 @@ export default function Home() {
           </span>
           <input
             type="file"
+            multiple
             accept={ACCEPT}
             onChange={(e) => onSelect(e.target.files)}
             style={{
@@ -217,11 +216,45 @@ export default function Home() {
               padding: "12px",
             }}
           />
-          <div style={{ marginTop: 8, fontSize: 12, color: "#94a3b8" }}>{fileLabel}</div>
+          <div style={{ marginTop: 8, fontSize: 12, color: "#94a3b8" }}>
+            {files.length === 0 ? (
+              fileLabel
+            ) : (
+              <div>
+                <div style={{ marginBottom: 8 }}>{fileLabel}</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {files.map((file, i) => (
+                    <div
+                      key={file.name + i}
+                      style={{
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                        background: "rgba(2,6,23,0.45)",
+                        padding: "6px 8px",
+                        borderRadius: 8,
+                        border: "1px solid rgba(148,163,184,0.15)",
+                        color: "#e2e8f0",
+                      }}
+                    >
+                      <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "80%" }}>{file.name}</div>
+                      <button
+                        type="button"
+                        onClick={() => removeFile(i)}
+                        style={{ background: "transparent", border: "none", color: "#fda4af", cursor: "pointer" }}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
         </label>
 
         <div style={{ marginTop: 10, fontSize: 12, color: "#94a3b8" }}>
-          Accepted: .pdf, .docx, .pptx, .txt, .png, .jpg, .jpeg (max 20MB)
+          Accepted: .pdf, .docx, .pptx, .txt, .png, .jpg, .jpeg (max 20MB each)
         </div>
 
         {error && (
