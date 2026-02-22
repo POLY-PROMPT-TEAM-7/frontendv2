@@ -1,5 +1,7 @@
+"use client";
+
 import { KnowledgeGraph } from "../../components/graphs";
 
 export default function Home() {
-  return <KnowledgeGraph />;
+  return <KnowledgeGraph graphData={undefined} />;
 }

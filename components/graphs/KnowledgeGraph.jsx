@@ -2,7 +2,7 @@
 
 import { useState, useMemo, useCallback, useEffect } from "react";
 
-import { GRAPH_DATA } from "./temporaryData";
+
 import { buildLayout } from "./layout";
 
 import GlobalStyles from "./GlobalStyles";
@@ -13,7 +13,7 @@ import GraphSvg from "./GraphSvg";
 import NodeCards from "./NodeCards";
 import DetailPanel from "./DetailPanel";
 
-export default function KnowledgeGraph() {
+export default function KnowledgeGraph({ graphData }) {
   const [hovered, setHovered] = useState(null);
   const [selected, setSelected] = useState(null);
   const [typeFilter, setTypeFilter] = useState("all");
@@ -29,19 +29,24 @@ export default function KnowledgeGraph() {
     return () => clearInterval(id);
   }, []);
 
-  const { nodes, links } = useMemo(() => {
-    const nodes = GRAPH_DATA.nodes.filter(
+  const { nodes, links, totalLayerCount } = useMemo(() => {
+    const sourceNodes = Array.isArray(graphData?.nodes) ? graphData.nodes : [];
+    const sourceLinks = Array.isArray(graphData?.links) ? graphData.links : [];
+
+    const nodes = sourceNodes.filter(
       (n) =>
         n.layer <= maxLayer && (typeFilter === "all" || n.type === typeFilter),
     );
     const ids = new Set(nodes.map((n) => n.id));
+
     return {
       nodes,
-      links: GRAPH_DATA.links.filter(
+      links: sourceLinks.filter(
         (l) => ids.has(l.source) && ids.has(l.target),
       ),
+      totalLayerCount: [...new Set(sourceNodes.map((n) => n.layer))].length,
     };
-  }, [typeFilter, maxLayer]);
+  }, [graphData, typeFilter, maxLayer]);
 
   const layout = useMemo(() => buildLayout(nodes), [nodes]);
 
@@ -70,9 +75,6 @@ export default function KnowledgeGraph() {
     () => [...new Set(nodes.map((n) => n.layer))].sort((a, b) => a - b),
     [nodes],
   );
-
-  const totalLayerCount = [...new Set(GRAPH_DATA.nodes.map((n) => n.layer))]
-    .length;
 
   const onWheel = useCallback((e) => {
     if (!e.ctrlKey && !e.metaKey) return;
@@ -147,7 +149,11 @@ export default function KnowledgeGraph() {
         />
       </GraphCanvas>
 
-      <DetailPanel selected={selected} setSelected={setSelected} />
+      <DetailPanel
+        selected={selected}
+        setSelected={setSelected}
+        graphData={graphData}
+      />
     </div>
   );
 }
