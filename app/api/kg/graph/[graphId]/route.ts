@@ -181,24 +181,36 @@ export async function GET(request: Request, { params }: Params) {
     const subgraphResult = await fetchBackendJson(subgraphUrl, "GET");
 
     if (subgraphResult.ok) {
-      return NextResponse.json(
-        {
-          ok: true,
-          graphId,
-          graph: null,
-          rendererGraph: backendSubgraphToRendererGraph(subgraphResult.payload),
-        },
-        { status: 200 },
-      );
-    }
+      const rendererGraph = backendSubgraphToRendererGraph(subgraphResult.payload);
+      if (rendererGraph.nodes.length > 0 || rendererGraph.links.length > 0) {
+        return NextResponse.json(
+          {
+            ok: true,
+            graphId,
+            graph: null,
+            rendererGraph,
+          },
+          { status: 200 },
+        );
+      }
 
-    attempts.push({
-      endpoint: "subgraph",
-      backendUrl: subgraphUrl,
-      status: subgraphResult.status,
-      payload: subgraphResult.payload,
-      cause: subgraphResult.reason,
-    });
+      attempts.push({
+        endpoint: "subgraph",
+        backendUrl: subgraphUrl,
+        status: 200,
+        payload: subgraphResult.payload,
+        cause: "subgraph returned empty graph",
+      });
+      
+    } else {
+      attempts.push({
+        endpoint: "subgraph",
+        backendUrl: subgraphUrl,
+        status: subgraphResult.status,
+        payload: subgraphResult.payload,
+        cause: subgraphResult.reason,
+      });
+    }
   }
 
   if (relationshipsEndpoint) {
