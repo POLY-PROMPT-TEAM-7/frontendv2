@@ -3,7 +3,7 @@
 import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 
-const MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024;
+const MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024;
 const ACCEPT = ".pdf,.docx,.pptx,.txt,.png,.jpg,.jpeg";
 const SUPPORTED_EXTENSIONS = new Set([
   ".pdf",
@@ -63,6 +63,13 @@ export default function Home() {
       return { ok: false, message: "Please choose at least one file." };
     }
 
+    if (selected.length > 1) {
+      return {
+        ok: false,
+        message: "Please choose one file. Backend accepts one file per upload.",
+      };
+    }
+
     for (const file of selected) {
       const ext = getExtension(file.name);
       if (!SUPPORTED_EXTENSIONS.has(ext)) {
@@ -72,7 +79,7 @@ export default function Home() {
       if (file.size > MAX_FILE_SIZE_BYTES) {
         return {
           ok: false,
-          message: `File exceeds 25MB (${prettyMb(file.size)}): ${file.name}`,
+          message: `File exceeds 20MB (${prettyMb(file.size)}): ${file.name}`,
         };
       }
     }
@@ -170,7 +177,7 @@ export default function Home() {
       >
         <h1 style={{ fontSize: 32, margin: 0 }}>Knowledge Graph Uploader</h1>
         <p style={{ marginTop: 10, color: "#94a3b8", lineHeight: 1.6 }}>
-          Upload study files, forward each one as a gzip file, and open the generated graph.
+          Upload a study file, process it through the backend, and open the generated graph.
         </p>
 
         <label style={{ display: "block", marginTop: 20 }}>
@@ -199,7 +206,6 @@ export default function Home() {
           </span>
           <input
             type="file"
-            multiple
             accept={ACCEPT}
             onChange={(e) => onSelect(e.target.files)}
             style={{
@@ -215,7 +221,7 @@ export default function Home() {
         </label>
 
         <div style={{ marginTop: 10, fontSize: 12, color: "#94a3b8" }}>
-          Accepted: .pdf, .docx, .pptx, .txt, .png, .jpg, .jpeg (max 25MB each)
+          Accepted: .pdf, .docx, .pptx, .txt, .png, .jpg, .jpeg (max 20MB)
         </div>
 
         {error && (

@@ -1,0 +1,42 @@
+name: Smoke Tests
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Start stack
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: docker compose -f DockerCompose/compose.smoke.yml up -d --build
+
+      - name: Backend smoke
+        env:
+          SMOKE_ALLOW_PARTIAL: "1"
+        run: bash scripts/smoke/smoke-backend.sh http://localhost:8000
+
+      - name: Frontend smoke
+        env:
+          SMOKE_ALLOW_PARTIAL: "1"
+        run: bash scripts/smoke/smoke-frontend.sh http://localhost:3000
+
+      - name: Upload evidence artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-evidence
+          path: .sisyphus/evidence
+
+      - name: Compose logs on failure
+        if: failure()
+        run: docker compose -f DockerCompose/compose.smoke.yml logs
+
+      - name: Teardown
+        if: always()
+        run: docker compose -f DockerCompose/compose.smoke.yml down -v

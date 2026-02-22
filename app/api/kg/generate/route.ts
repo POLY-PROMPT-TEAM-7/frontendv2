@@ -1,19 +1,16 @@
-import { randomUUID } from "crypto";
-import { gzipSync } from "zlib";
-
 import { NextResponse } from "next/server";
 
 import {
-  isKnowledgeGraphPayload,
-  isRendererGraphPayload,
-  studyOntologyToRendererGraph,
-} from "../../../../lib/kg/adapters/studyOntologyToRenderer";
+  backendRelationshipsToRendererGraph,
+  backendSubgraphToRendererGraph,
+} from "../../../../lib/kg/adapters/backendSubgraphToRenderer";
+import type { RendererGraph } from "../../../../lib/kg/adapters/studyOntologyToRenderer";
 import { type Capabilities } from "../../../../lib/kg/capabilities";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024;
+const MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024;
 const SUPPORTED_EXTENSIONS = new Set([
   ".pdf",
   ".docx",
@@ -30,9 +27,31 @@ function getExtension(name: string): string {
   return name.slice(dot).toLowerCase();
 }
 
-function safeGzName(fileName: string): string {
-  const trimmed = fileName.trim() || "upload";
-  return trimmed.endsWith(".gz") ? trimmed : `${trimmed}.gz`;
+function getBackendBaseUrl(): string {
+  return (process.env.API_URL || "http://localhost:8000").replace(/\/+$/, "");
+}
+
+function parseBackendPayload(contentType: string | null, body: string): unknown {
+  if (contentType?.toLowerCase().includes("application/json")) {
+    return JSON.parse(body);
+  }
+
+  try {
+    return JSON.parse(body);
+  } catch {
+    return { raw: body };
+  }
+}
+
+function toRecord(input: unknown): Record<string, unknown> | null {
+  if (!input || typeof input !== "object") return null;
+  return input as Record<string, unknown>;
+}
+
+function toStringId(value: unknown): string | null {
+  if (typeof value === "string" && value.trim()) return value;
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  return null;
 }
 
 async function readCapabilities(request: Request): Promise<{
@@ -67,8 +86,7 @@ async function readCapabilities(request: Request): Promise<{
       };
     }
 
-    const capabilities = (payload as { capabilities?: Capabilities })
-      .capabilities;
+    const capabilities = (payload as { capabilities?: Capabilities }).capabilities;
     if (!capabilities) {
       return {
         ok: false,
@@ -94,81 +112,90 @@ async function readCapabilities(request: Request): Promise<{
 }
 
 function coerceFileList(formData: FormData): File[] {
-  return formData
-    .getAll("files")
-    .filter((entry): entry is File => entry instanceof File);
+  return formData.getAll("files").filter((entry): entry is File => entry instanceof File);
 }
 
-function validateFiles(
-  files: File[],
-): { ok: true } | { ok: false; code: string; message: string } {
+function validateFiles(files: File[]): { ok: true } | { ok: false; code: string; message: string } {
   if (files.length === 0) {
     return {
       ok: false,
       code: "NO_FILES",
-      message: "Please add at least one file",
+      message: "Please add a file",
     };
   }
 
-  for (const file of files) {
-    const extension = getExtension(file.name);
-    if (!SUPPORTED_EXTENSIONS.has(extension)) {
-      return {
-        ok: false,
-        code: "UNSUPPORTED_FILE_TYPE",
-        message: `Unsupported file type: ${file.name}`,
-      };
-    }
+  if (files.length > 1) {
+    return {
+      ok: false,
+      code: "MULTI_FILE_UNSUPPORTED",
+      message: "Backend accepts one file per upload.",
+    };
+  }
 
-    if (file.size > MAX_FILE_SIZE_BYTES) {
-      return {
-        ok: false,
-        code: "FILE_TOO_LARGE",
-        message: `File exceeds 25MB limit: ${file.name}`,
-      };
-    }
+  const file = files[0];
+  const extension = getExtension(file.name);
+  if (!SUPPORTED_EXTENSIONS.has(extension)) {
+    return {
+      ok: false,
+      code: "UNSUPPORTED_FILE_TYPE",
+      message: `Unsupported file type: ${file.name}`,
+    };
+  }
+
+  if (file.size > MAX_FILE_SIZE_BYTES) {
+    return {
+      ok: false,
+      code: "FILE_TOO_LARGE",
+      message: `File exceeds 20MB limit: ${file.name}`,
+    };
   }
 
   return { ok: true };
 }
 
-async function gzipFile(file: File): Promise<Blob> {
-  const raw = Buffer.from(await file.arrayBuffer());
-  const zipped = gzipSync(raw);
-  return new Blob([zipped], { type: "application/gzip" });
+function parseErrorPayload(response: Response, rawBody: string): unknown {
+  return parseBackendPayload(response.headers.get("content-type"), rawBody);
 }
 
-function getBackendBaseUrl(): string {
-  return (process.env.API_URL || "http://localhost:8000").replace(/\/+$/, "");
+function readBooleanEnv(name: string, fallback: boolean): boolean {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const normalized = raw.trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "off"].includes(normalized)) return false;
+  return fallback;
 }
 
-function extractRemoteId(payload: Record<string, unknown>): string | null {
-  const candidate = payload.graph_id ?? payload.job_id ?? payload.id;
-  if (typeof candidate === "string" && candidate.trim()) return candidate;
-  if (typeof candidate === "number" && Number.isFinite(candidate))
-    return String(candidate);
-  return null;
-}
-
-function parseBackendPayload(
-  contentType: string | null,
-  body: string,
-): unknown {
-  if (contentType?.toLowerCase().includes("application/json")) {
-    return JSON.parse(body);
-  }
-
+async function fetchBackendJson(
+  url: string,
+  method: string,
+): Promise<
+  | { ok: true; payload: unknown }
+  | { ok: false; status?: number; payload?: unknown; reason?: string }
+> {
   try {
-    return JSON.parse(body);
-  } catch {
-    return { raw: body };
+    const response = await fetch(url, {
+      method,
+      cache: "no-store",
+    });
+    const text = await response.text();
+    const payload = parseBackendPayload(response.headers.get("content-type"), text);
+    if (!response.ok) {
+      return {
+        ok: false,
+        status: response.status,
+        payload,
+      };
+    }
+    return { ok: true, payload };
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    return { ok: false, reason };
   }
 }
 
 export async function POST(request: Request) {
   const incomingForm = await request.formData();
-  const topicEntry = incomingForm.get("topic");
-  const topic = typeof topicEntry === "string" ? topicEntry.trim() : "";
   const files = coerceFileList(incomingForm);
 
   const validation = validateFiles(files);
@@ -199,53 +226,49 @@ export async function POST(request: Request) {
     );
   }
 
-  const capabilities = capsResult.capabilities;
+  const {
+    uploadMultipartEndpoint,
+    extractJsonEndpoint,
+    subgraphBySourceEndpoint,
+    relationshipsListEndpoint,
+  } =
+    capsResult.capabilities;
 
-  if (!capabilities.extractMultipartEndpoint) {
-    if (capabilities.extractJsonEndpoint) {
-      return NextResponse.json(
-        {
-          ok: false,
-          error: {
-            code: "BACKEND_MISSING_UPLOAD_SUPPORT",
-            message:
-              "Backend only supports text_path JSON extraction; file uploads are unavailable.",
-          },
-        },
-        { status: 400 },
-      );
-    }
-
+  if (
+    !uploadMultipartEndpoint ||
+    !extractJsonEndpoint ||
+    (!subgraphBySourceEndpoint && !relationshipsListEndpoint)
+  ) {
     return NextResponse.json(
       {
         ok: false,
         error: {
           code: "BACKEND_MISSING_UPLOAD_SUPPORT",
-          message: "Backend did not advertise multipart upload support.",
+          message: "Backend did not advertise required upload/extract/subgraph endpoints.",
+          detail: {
+            hasUpload: Boolean(uploadMultipartEndpoint),
+            hasExtract: Boolean(extractJsonEndpoint),
+            hasSubgraph: Boolean(subgraphBySourceEndpoint),
+            hasRelationships: Boolean(relationshipsListEndpoint),
+          },
         },
       },
       { status: 400 },
     );
   }
 
-  const endpoint = capabilities.extractMultipartEndpoint;
-  const backendUrl = `${getBackendBaseUrl()}${endpoint.path}`;
-  const outboundForm = new FormData();
+  const backendBaseUrl = getBackendBaseUrl();
+  const file = files[0];
 
-  for (const file of files) {
-    const gzBlob = await gzipFile(file);
-    outboundForm.append(endpoint.fileField, gzBlob, safeGzName(file.name));
-  }
+  const uploadUrl = `${backendBaseUrl}${uploadMultipartEndpoint.path}`;
+  const uploadForm = new FormData();
+  uploadForm.append(uploadMultipartEndpoint.fileField, file, file.name);
 
-  if (topic) {
-    outboundForm.append("topic", topic);
-  }
-
-  let backendResponse: Response;
+  let uploadResponse: Response;
   try {
-    backendResponse = await fetch(backendUrl, {
-      method: endpoint.method.toUpperCase(),
-      body: outboundForm,
+    uploadResponse = await fetch(uploadUrl, {
+      method: uploadMultipartEndpoint.method.toUpperCase(),
+      body: uploadForm,
       cache: "no-store",
     });
   } catch (error) {
@@ -256,30 +279,25 @@ export async function POST(request: Request) {
         error: {
           code: "BACKEND_UNREACHABLE",
           message: "Unable to contact backend upload endpoint",
-          detail: { backendUrl, cause: message },
+          detail: { uploadUrl, cause: message },
         },
       },
       { status: 502 },
     );
   }
 
-  const rawBody = await backendResponse.text();
-  const parsed = parseBackendPayload(
-    backendResponse.headers.get("content-type"),
-    rawBody,
-  );
-
-  if (!backendResponse.ok) {
+  if (!uploadResponse.ok) {
+    const rawBody = await uploadResponse.text();
     return NextResponse.json(
       {
         ok: false,
         error: {
           code: "BACKEND_REQUEST_FAILED",
-          message: `Backend returned HTTP ${backendResponse.status}`,
+          message: `Upload endpoint returned HTTP ${uploadResponse.status}`,
           detail: {
-            backendUrl,
-            status: backendResponse.status,
-            payload: parsed,
+            uploadUrl,
+            status: uploadResponse.status,
+            payload: parseErrorPayload(uploadResponse, rawBody),
           },
         },
       },
@@ -287,58 +305,138 @@ export async function POST(request: Request) {
     );
   }
 
-  if (isKnowledgeGraphPayload(parsed)) {
-    const graphId = `local-${randomUUID()}`;
-    const rendererGraph = studyOntologyToRendererGraph(parsed);
+  const uploadPayload = toRecord(await uploadResponse.json().catch(() => null));
+  const artifactPath = uploadPayload ? toStringId(uploadPayload.artifact_path) : null;
+  const sourceId =
+    uploadPayload && (toStringId(uploadPayload.source_id) ?? toStringId(uploadPayload.id));
+
+  if (!artifactPath || !sourceId) {
     return NextResponse.json(
       {
-        ok: true,
-        mode: "local",
-        graphId,
-        graph: parsed,
-        rendererGraph,
-      },
-      { status: 200 },
-    );
-  }
-
-  if (isRendererGraphPayload(parsed)) {
-    const graphId = `local-${randomUUID()}`;
-    return NextResponse.json(
-      {
-        ok: true,
-        mode: "local",
-        graphId,
-        graph: null,
-        rendererGraph: parsed,
-      },
-      { status: 200 },
-    );
-  }
-
-  if (parsed && typeof parsed === "object") {
-    const remoteId = extractRemoteId(parsed as Record<string, unknown>);
-    if (remoteId) {
-      return NextResponse.json(
-        {
-          ok: true,
-          mode: "remote",
-          graphId: remoteId,
+        ok: false,
+        error: {
+          code: "UNSUPPORTED_BACKEND_RESPONSE",
+          message: "Upload response missing artifact_path or source_id",
+          detail: { payload: uploadPayload },
         },
-        { status: 200 },
-      );
+      },
+      { status: 502 },
+    );
+  }
+
+  const extractUrl = `${backendBaseUrl}${extractJsonEndpoint.path}`;
+  const queryCanvas = readBooleanEnv("KG_QUERY_CANVAS", true);
+  const queryOpenalex = readBooleanEnv("KG_QUERY_OPENALEX", true);
+  let extractResponse: Response;
+  try {
+    extractResponse = await fetch(extractUrl, {
+      method: extractJsonEndpoint.method.toUpperCase(),
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        [extractJsonEndpoint.requestField]: artifactPath,
+        query_canvas: queryCanvas,
+        query_openalex: queryOpenalex,
+      }),
+      cache: "no-store",
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return NextResponse.json(
+      {
+        ok: false,
+        error: {
+          code: "BACKEND_UNREACHABLE",
+          message: "Unable to contact backend extract endpoint",
+          detail: { extractUrl, cause: message },
+        },
+      },
+      { status: 502 },
+    );
+  }
+
+  if (!extractResponse.ok) {
+    const rawBody = await extractResponse.text();
+    return NextResponse.json(
+      {
+        ok: false,
+        error: {
+          code: "BACKEND_REQUEST_FAILED",
+          message: `Extract endpoint returned HTTP ${extractResponse.status}`,
+          detail: {
+            extractUrl,
+            status: extractResponse.status,
+            payload: parseErrorPayload(extractResponse, rawBody),
+          },
+        },
+      },
+      { status: 502 },
+    );
+  }
+
+  let rendererGraph: RendererGraph = { nodes: [], links: [] };
+  const materializationErrors: Array<Record<string, unknown>> = [];
+
+  if (subgraphBySourceEndpoint) {
+    const subgraphPath = subgraphBySourceEndpoint.pathTemplate.replace(
+      `{${subgraphBySourceEndpoint.sourceIdParam}}`,
+      encodeURIComponent(sourceId),
+    );
+    const subgraphUrl = `${backendBaseUrl}${subgraphPath}`;
+    const subgraphResult = await fetchBackendJson(subgraphUrl, "GET");
+    if (subgraphResult.ok) {
+      rendererGraph = backendSubgraphToRendererGraph(subgraphResult.payload);
+    } else {
+      materializationErrors.push({
+        endpoint: "subgraph",
+        url: subgraphUrl,
+        status: subgraphResult.status,
+        payload: subgraphResult.payload,
+        cause: subgraphResult.reason,
+      });
     }
+  }
+
+  if (rendererGraph.nodes.length === 0 && relationshipsListEndpoint) {
+    const relationshipsUrl = `${backendBaseUrl}${relationshipsListEndpoint.path}?limit=1000&offset=0`;
+    const relationshipsResult = await fetchBackendJson(relationshipsUrl, "GET");
+    if (relationshipsResult.ok) {
+      rendererGraph = backendRelationshipsToRendererGraph(relationshipsResult.payload);
+    } else {
+      materializationErrors.push({
+        endpoint: "relationships",
+        url: relationshipsUrl,
+        status: relationshipsResult.status,
+        payload: relationshipsResult.payload,
+        cause: relationshipsResult.reason,
+      });
+    }
+  }
+
+  if (rendererGraph.nodes.length === 0 && materializationErrors.length > 0) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: {
+          code: "BACKEND_REQUEST_FAILED",
+          message:
+            "Backend graph materialization failed for all advertised endpoints",
+          detail: {
+            attempts: materializationErrors,
+          },
+        },
+      },
+      { status: 502 },
+    );
   }
 
   return NextResponse.json(
     {
-      ok: false,
-      error: {
-        code: "UNSUPPORTED_BACKEND_RESPONSE",
-        message: "Backend response is not a supported graph payload",
-        detail: { payload: parsed },
-      },
+      ok: true,
+      mode: "remote",
+      graphId: sourceId,
+      graph: null,
+      rendererGraph,
     },
-    { status: 502 },
+    { status: 200 },
   );
 }

@@ -5,6 +5,10 @@ import {
   isRendererGraphPayload,
   studyOntologyToRendererGraph,
 } from "../../../../../lib/kg/adapters/studyOntologyToRenderer";
+import {
+  backendRelationshipsToRendererGraph,
+  backendSubgraphToRendererGraph,
+} from "../../../../../lib/kg/adapters/backendSubgraphToRenderer";
 import { type Capabilities } from "../../../../../lib/kg/capabilities";
 
 export const runtime = "nodejs";
@@ -87,6 +91,34 @@ function parsePayload(contentType: string | null, body: string): unknown {
   }
 }
 
+async function fetchBackendJson(
+  url: string,
+  method: string,
+): Promise<
+  | { ok: true; payload: unknown }
+  | { ok: false; status?: number; payload?: unknown; reason?: string }
+> {
+  try {
+    const response = await fetch(url, {
+      method,
+      cache: "no-store",
+    });
+    const body = await response.text();
+    const payload = parsePayload(response.headers.get("content-type"), body);
+    if (!response.ok) {
+      return {
+        ok: false,
+        status: response.status,
+        payload,
+      };
+    }
+    return { ok: true, payload };
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    return { ok: false, reason };
+  }
+}
+
 export async function GET(request: Request, { params }: Params) {
   const { graphId } = await params;
 
@@ -118,8 +150,11 @@ export async function GET(request: Request, { params }: Params) {
     );
   }
 
-  const endpoint = capsResult.capabilities.graphGetEndpoint;
-  if (!endpoint) {
+  const subgraphEndpoint = capsResult.capabilities.subgraphBySourceEndpoint;
+  const relationshipsEndpoint = capsResult.capabilities.relationshipsListEndpoint;
+  const graphEndpoint = capsResult.capabilities.graphGetEndpoint;
+
+  if (!subgraphEndpoint && !relationshipsEndpoint && !graphEndpoint) {
     return NextResponse.json(
       {
         ok: false,
@@ -133,57 +168,115 @@ export async function GET(request: Request, { params }: Params) {
     );
   }
 
-  const encodedId = encodeURIComponent(graphId);
-  const path = endpoint.pathTemplate.replace(
-    `{${endpoint.idParam}}`,
-    encodedId,
-  );
-  const backendUrl = `${getBackendBaseUrl()}${path}`;
+  const backendBase = getBackendBaseUrl();
 
-  let backendResponse: Response;
-  try {
-    backendResponse = await fetch(backendUrl, {
-      method: "GET",
-      cache: "no-store",
+  const attempts: Array<Record<string, unknown>> = [];
+
+  if (subgraphEndpoint) {
+    const subgraphPath = subgraphEndpoint.pathTemplate.replace(
+      `{${subgraphEndpoint.sourceIdParam}}`,
+      encodeURIComponent(graphId),
+    );
+    const subgraphUrl = `${backendBase}${subgraphPath}`;
+    const subgraphResult = await fetchBackendJson(subgraphUrl, "GET");
+
+    if (subgraphResult.ok) {
+      return NextResponse.json(
+        {
+          ok: true,
+          graphId,
+          graph: null,
+          rendererGraph: backendSubgraphToRendererGraph(subgraphResult.payload),
+        },
+        { status: 200 },
+      );
+    }
+
+    attempts.push({
+      endpoint: "subgraph",
+      backendUrl: subgraphUrl,
+      status: subgraphResult.status,
+      payload: subgraphResult.payload,
+      cause: subgraphResult.reason,
     });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+  }
+
+  if (relationshipsEndpoint) {
+    const relationshipsUrl = `${backendBase}${relationshipsEndpoint.path}?limit=1000&offset=0`;
+    const relationshipsResult = await fetchBackendJson(relationshipsUrl, "GET");
+    if (relationshipsResult.ok) {
+      return NextResponse.json(
+        {
+          ok: true,
+          graphId,
+          graph: null,
+          rendererGraph: backendRelationshipsToRendererGraph(
+            relationshipsResult.payload,
+          ),
+        },
+        { status: 200 },
+      );
+    }
+
+    attempts.push({
+      endpoint: "relationships",
+      backendUrl: relationshipsUrl,
+      status: relationshipsResult.status,
+      payload: relationshipsResult.payload,
+      cause: relationshipsResult.reason,
+    });
+  }
+
+  if (!graphEndpoint) {
     return NextResponse.json(
       {
         ok: false,
         error: {
-          code: "BACKEND_UNREACHABLE",
-          message: "Unable to fetch graph from backend",
-          detail: { backendUrl, cause: message },
+          code: "BACKEND_GRAPH_FETCH_FAILED",
+          message:
+            "Backend graph materialization failed for all advertised endpoints",
+          detail: { attempts },
         },
       },
       { status: 502 },
     );
   }
 
-  const rawBody = await backendResponse.text();
-  const parsed = parsePayload(
-    backendResponse.headers.get("content-type"),
-    rawBody,
+  const encodedId = encodeURIComponent(graphId);
+  const path = graphEndpoint.pathTemplate.replace(
+    `{${graphEndpoint.idParam}}`,
+    encodedId,
   );
+  const backendUrl = `${backendBase}${path}`;
 
-  if (!backendResponse.ok) {
+  const graphResult = await fetchBackendJson(backendUrl, "GET");
+  if (!graphResult.ok) {
     return NextResponse.json(
       {
         ok: false,
         error: {
           code: "BACKEND_GRAPH_FETCH_FAILED",
-          message: `Backend returned HTTP ${backendResponse.status}`,
+          message:
+            "Backend graph materialization failed for all advertised endpoints",
           detail: {
-            backendUrl,
-            status: backendResponse.status,
-            payload: parsed,
+            attempts: [
+              ...attempts,
+              {
+                endpoint: "legacyGraph",
+                backendUrl,
+                status: graphResult.status,
+                payload: graphResult.payload,
+                cause: graphResult.reason,
+              },
+            ],
           },
         },
       },
       { status: 502 },
     );
   }
+
+  const parsed = graphResult.payload;
 
   if (isRendererGraphPayload(parsed)) {
     return NextResponse.json(

@@ -1,15 +1,26 @@
 export type FileField = "file" | "files" | "files[]";
+type WriteMethod = "post" | "put";
 
 export type Capabilities = {
   hasOpenAPI: boolean;
-  extractMultipartEndpoint?: {
+  uploadMultipartEndpoint?: {
     path: string;
-    method: "post" | "put";
+    method: WriteMethod;
     fileField: FileField;
   };
   extractJsonEndpoint?: {
     path: string;
-    method: "post" | "put";
+    method: WriteMethod;
+    requestField: "artifact_path" | "text_path" | "text";
+  };
+  relationshipsListEndpoint?: {
+    path: string;
+    method: "get";
+  };
+  subgraphBySourceEndpoint?: {
+    pathTemplate: string;
+    method: "get";
+    sourceIdParam: string;
   };
   graphGetEndpoint?: {
     pathTemplate: string;
@@ -89,6 +100,38 @@ function looksLikeBinaryFileArray(schema: unknown): boolean {
   return rec.type === "array" && looksLikeBinaryFile(rec.items);
 }
 
+function toLowerPath(pathTemplate: string): string {
+  return pathTemplate.trim().toLowerCase();
+}
+
+function hasProp(record: Record<string, unknown>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(record, key);
+}
+
+function uploadPriority(pathTemplate: string, fileField: FileField): number {
+  const lower = toLowerPath(pathTemplate);
+  let score = 100;
+  if (lower === "/upload") score -= 50;
+  else if (lower.includes("upload")) score -= 20;
+
+  if (fileField === "file") score -= 10;
+  else if (fileField === "files") score -= 5;
+
+  return score;
+}
+
+function extractPriority(pathTemplate: string, field: "artifact_path" | "text_path" | "text"): number {
+  const lower = toLowerPath(pathTemplate);
+  let score = 100;
+  if (lower === "/extract") score -= 50;
+  else if (lower.includes("extract")) score -= 20;
+
+  if (field === "artifact_path") score -= 10;
+  else if (field === "text_path") score -= 5;
+
+  return score;
+}
+
 function countPathParams(pathTemplate: string): { count: number; first?: string } {
   const matches = Array.from(pathTemplate.matchAll(/\{([^}]+)\}/g));
   return { count: matches.length, first: matches[0]?.[1] };
@@ -101,16 +144,27 @@ export function deriveBackendCapabilities(openapi: unknown): Capabilities {
 
   const caps: Capabilities = { hasOpenAPI: true };
 
-  let bestMultipart:
+  let bestUpload:
     | {
-        priority: 1 | 2 | 3;
+        score: number;
         path: string;
-        method: "post" | "put";
+        method: WriteMethod;
         fileField: FileField;
       }
     | undefined;
 
+  let bestExtract:
+    | {
+        score: number;
+        path: string;
+        method: WriteMethod;
+        requestField: "artifact_path" | "text_path" | "text";
+      }
+    | undefined;
+
   for (const [pathTemplate, pathItem] of Object.entries(paths)) {
+    const pathLower = toLowerPath(pathTemplate);
+
     for (const method of ["post", "put"] as const) {
       const op = getOperation(pathItem, method);
       if (!op) continue;
@@ -118,47 +172,83 @@ export function deriveBackendCapabilities(openapi: unknown): Capabilities {
       const mpSchema = getSchemaForContent(doc ?? {}, op, "multipart/form-data");
       const mpProps = asRecord(asRecord(mpSchema)?.properties);
       if (mpProps) {
+        const fileSchema = derefSchema(doc ?? {}, mpProps.file, new Set());
         const filesSchema = derefSchema(doc ?? {}, mpProps.files, new Set());
         const filesArrSchema = derefSchema(doc ?? {}, mpProps["files[]"], new Set());
-        const fileSchema = derefSchema(doc ?? {}, mpProps.file, new Set());
 
-        if (looksLikeBinaryFileArray(filesSchema)) {
+        const fileField = looksLikeBinaryFile(fileSchema)
+          ? ("file" as const)
+          : looksLikeBinaryFileArray(filesSchema)
+            ? ("files" as const)
+            : looksLikeBinaryFileArray(filesArrSchema)
+              ? ("files[]" as const)
+              : null;
+
+        if (fileField) {
+          const score = uploadPriority(pathTemplate, fileField);
           const candidate = {
-            priority: 1 as const,
+            score,
             path: pathTemplate,
             method,
-            fileField: "files" as const,
+            fileField,
           };
-          if (!bestMultipart || candidate.priority < bestMultipart.priority) {
-            bestMultipart = candidate;
-          }
-        } else if (looksLikeBinaryFileArray(filesArrSchema)) {
-          const candidate = {
-            priority: 2 as const,
-            path: pathTemplate,
-            method,
-            fileField: "files[]" as const,
-          };
-          if (!bestMultipart || candidate.priority < bestMultipart.priority) {
-            bestMultipart = candidate;
-          }
-        } else if (looksLikeBinaryFile(fileSchema)) {
-          const candidate = {
-            priority: 3 as const,
-            path: pathTemplate,
-            method,
-            fileField: "file" as const,
-          };
-          if (!bestMultipart || candidate.priority < bestMultipart.priority) {
-            bestMultipart = candidate;
+          if (!bestUpload || candidate.score < bestUpload.score) {
+            bestUpload = candidate;
           }
         }
       }
 
       const jsonSchema = getSchemaForContent(doc ?? {}, op, "application/json");
       const jsonProps = asRecord(asRecord(jsonSchema)?.properties);
-      if (!caps.extractJsonEndpoint && jsonProps && "text_path" in jsonProps) {
-        caps.extractJsonEndpoint = { path: pathTemplate, method };
+      if (jsonProps) {
+        const requestField: "artifact_path" | "text_path" | "text" | null =
+          hasProp(jsonProps, "artifact_path")
+            ? "artifact_path"
+            : hasProp(jsonProps, "text_path")
+              ? "text_path"
+              : hasProp(jsonProps, "text")
+                ? "text"
+                : null;
+
+        if (requestField) {
+          const score = extractPriority(pathTemplate, requestField);
+          const candidate = {
+            score,
+            path: pathTemplate,
+            method,
+            requestField,
+          };
+          if (!bestExtract || candidate.score < bestExtract.score) {
+            bestExtract = candidate;
+          }
+        }
+      }
+    }
+
+    if (!caps.relationshipsListEndpoint) {
+      const getOperationValue = getOperation(pathItem, "get");
+      if (getOperationValue && pathLower === "/query/relationships") {
+        caps.relationshipsListEndpoint = {
+          path: pathTemplate,
+          method: "get",
+        };
+      }
+    }
+
+    if (!caps.subgraphBySourceEndpoint) {
+      const getOperationValue = getOperation(pathItem, "get");
+      if (
+        getOperationValue &&
+        pathLower.includes("/query/subgraph/source/")
+      ) {
+        const { count, first } = countPathParams(pathTemplate);
+        if (count === 1 && first) {
+          caps.subgraphBySourceEndpoint = {
+            pathTemplate,
+            method: "get",
+            sourceIdParam: first,
+          };
+        }
       }
     }
 
@@ -177,11 +267,19 @@ export function deriveBackendCapabilities(openapi: unknown): Capabilities {
     }
   }
 
-  if (bestMultipart) {
-    caps.extractMultipartEndpoint = {
-      path: bestMultipart.path,
-      method: bestMultipart.method,
-      fileField: bestMultipart.fileField,
+  if (bestUpload) {
+    caps.uploadMultipartEndpoint = {
+      path: bestUpload.path,
+      method: bestUpload.method,
+      fileField: bestUpload.fileField,
+    };
+  }
+
+  if (bestExtract) {
+    caps.extractJsonEndpoint = {
+      path: bestExtract.path,
+      method: bestExtract.method,
+      requestField: bestExtract.requestField,
     };
   }
 
