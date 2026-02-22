@@ -1,0 +1,1 @@
+//Get graph data, delete graph
